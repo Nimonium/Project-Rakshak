@@ -1,7 +1,7 @@
 ## Project Structure
 
 ### Backend
-```text
+
 backend/
 │
 ├── app/
@@ -47,7 +47,7 @@ backend/
 ├── pyproject.toml
 └── README.md
 
-### Backend
+### Frontend
 
 frontend/
 │
