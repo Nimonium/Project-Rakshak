@@ -52,7 +52,7 @@ class ScoringService:
         features_df = self._extract_features(tx)
         
         # 2. ML Inference (XGBoost + Isolation Forest + SHAP)
-        xgb_prob, anomaly_score, shap_payload = inference_engine.predict_fraud(features_df)
+        xgb_prob, anomaly_score, graph_risk, shap_payload = inference_engine.predict_fraud(features_df)
         
         # 3. Graph Risk
         # Add to graph first (for real-time updates)
@@ -62,7 +62,7 @@ class ScoringService:
             tx.amount, 
             "temp_tx_id"
         )
-        graph_risk = self.graph_risk_engine.compute_account_risk(tx.sender_account_id)
+        # graph_risk is now computed once by engine.py as requested.
         
         # 4. Rules Engine
         historical_context = self._build_historical_context(tx)

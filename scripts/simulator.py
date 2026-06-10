@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 
 logger = structlog.get_logger(__name__)
 
-API_URL = "http://localhost:8000/api/v1/predict"
+API_URL = "http://localhost:8000/api/v1/predict/"
 
 class FraudSimulator:
     def __init__(self):

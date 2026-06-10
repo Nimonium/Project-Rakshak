@@ -14,6 +14,10 @@ import uuid
 from backend.app.api.router import api_router, ws_router
 from backend.app.core.config import settings
 from backend.app.core.websocket_manager import manager
+from backend.app.services.scoring_service import global_graph_builder
+from backend.app.db.session import async_session_maker
+from backend.app.db.models.transaction import Transaction
+from sqlalchemy.future import select
 
 # Configure basic structlog
 structlog.configure(
@@ -38,6 +42,24 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 async def lifespan(app: FastAPI):
     # Startup logic: Load models, connect to DB, connect to Redis
     logger.info("Starting up Project Rakshak Backend")
+    
+    # Pre-populate GraphBuilder from DB
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(select(Transaction))
+            txs = result.scalars().all()
+            for tx in txs:
+                if tx.sender_account_id and tx.receiver_account_id:
+                    global_graph_builder.add_transaction(
+                        sender_id=tx.sender_account_id,
+                        receiver_id=tx.receiver_account_id,
+                        amount=tx.amount,
+                        tx_id=tx.id
+                    )
+            logger.info(f"Populated GraphBuilder with {len(txs)} transactions.")
+    except Exception as e:
+        logger.error(f"Failed to populate GraphBuilder: {str(e)}")
+
     yield
     # Shutdown logic: Close connections, cleanup resources
     logger.info("Shutting down Project Rakshak Backend")

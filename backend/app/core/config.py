@@ -30,10 +30,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8  # 8 days
     
     # Database
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", 
-        "postgresql+asyncpg://rakshak_user:rakshak_password@localhost:5432/rakshak_db"
-    )
+    DATABASE_URL: str = "postgresql+asyncpg://rakshak:secretpassword@localhost:5433/rakshak_db"
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
