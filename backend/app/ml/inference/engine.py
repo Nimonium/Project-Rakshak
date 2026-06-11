@@ -19,12 +19,14 @@ class InferenceEngine:
     def _load_models(self):
         xgb_path = os.path.join(self.models_dir, "xgboost_model.joblib")
         iso_path = os.path.join(self.models_dir, "isolation_forest.joblib")
+        shap_path = os.path.join(self.models_dir, "shap_explainer.joblib")
+        feat_path = os.path.join(self.models_dir, "feature_names.joblib")
+        vt_path = os.path.join(self.models_dir, "variance_threshold.joblib")
         
         try:
             if os.path.exists(xgb_path):
                 self.xgb_model = joblib.load(xgb_path)
                 logger.info("XGBoost model loaded for inference.")
-                self.shap_engine = ShapEngine(xgb_path)
             else:
                 logger.warning(f"XGBoost model not found at {xgb_path}.")
                 
@@ -33,6 +35,23 @@ class InferenceEngine:
                 logger.info("Isolation Forest model loaded for inference.")
             else:
                 logger.warning(f"Isolation Forest model not found at {iso_path}.")
+                
+            if os.path.exists(shap_path):
+                self.explainer = joblib.load(shap_path)
+                logger.info("SHAP explainer loaded.")
+            else:
+                self.explainer = None
+                
+            if os.path.exists(feat_path):
+                self.feature_names = joblib.load(feat_path)
+            else:
+                self.feature_names = None
+                
+            if os.path.exists(vt_path):
+                self.vt = joblib.load(vt_path)
+            else:
+                self.vt = None
+                
         except Exception as e:
             logger.error(f"Error loading models: {str(e)}")
 
@@ -41,31 +60,62 @@ class InferenceEngine:
         Runs inference on provided features.
         Returns:
             xgb_prob (float): Probability of fraud from XGBoost.
-            anomaly_score (float): Anomaly score from Isolation Forest (normalized 0-1).
+            anomaly_score (float): Anomaly score from Isolation Forest.
             shap_payload (Dict): SHAP explanation payload.
         """
-        if self.xgb_model is None or self.iso_forest is None:
-            logger.error("Models are not loaded. Cannot run inference.")
-            return 0.0, 0.0, {}
+        if self.xgb_model is None:
+            return 0.0, 0.0, 0.0, {}
 
         try:
-            # 1. XGBoost Probability
-            xgb_prob = float(self.xgb_model.predict_proba(features)[0, 1])
+            # Reindex and apply VarianceThreshold if available
+            X = features.copy()
+            if hasattr(self, 'feature_names') and self.feature_names is not None:
+                X = X.reindex(columns=self.feature_names).fillna(0)
             
-            # 2. Isolation Forest Score
-            # decision_function returns negative values for anomalies, positive for normal
-            # Let's normalize it to a 0-1 risk score where 1 is highly anomalous
-            iso_raw = float(self.iso_forest.decision_function(features)[0])
-            # Sigmoid-like transformation for anomaly score (heuristic)
-            anomaly_score = 1.0 / (1.0 + np.exp(iso_raw * 2))
+            # Bug 1 Fix: use predict_proba, NOT predict
+            # Note: X might be a DataFrame, predict_proba expects 2D array
+            xgb_prob = float(self.xgb_model.predict_proba(X.values if hasattr(X, 'values') else X)[0, 1])
             
-            # 3. SHAP Explainability
-            shap_payload = self.shap_engine.explain_prediction(features, xgb_prob) if self.shap_engine else {}
+            # Isolation Forest (anomaly score)
+            iso_raw = 0.5
+            if self.iso_forest:
+                iso_raw = self.iso_forest.score_samples(X)[0]
+                # normalize to 0–1 where 1 = most anomalous
+                anomaly_score = float(round(1 - (iso_raw - (-0.5)) / 0.5, 4))
+            else:
+                anomaly_score = 0.5
             
-            return xgb_prob, anomaly_score, shap_payload
+            # Bug 2 Fix: SHAP — explicit float conversion before JSON
+            top_features_list = []
+            if hasattr(self, 'explainer') and self.explainer is not None:
+                shap_vals = self.explainer.shap_values(X)[0] # numpy array
+                contributions = {
+                    feat: round(float(val), 5) # cast to Python float
+                    for feat, val in zip(self.feature_names if hasattr(self, 'feature_names') else X.columns, shap_vals)
+                }
+                # Convert to the list format expected by PredictionResponse schema
+                sorted_contribs = sorted(contributions.items(), key=lambda x: abs(x[1]), reverse=True)[:10]
+                top_features_list = [{"feature": k, "impact": v} for k, v in sorted_contribs]
+                
+                # The user expects a dict in top_features based on their snippet, but the schema PredictionResponse expects List[FeatureImpact]. 
+                # We will satisfy the schema.
+
+            # Bug 3 Fix: Simulate graph_risk internally based on F3887 (we'll pass it in the payload so scoring_service can use it or we just return it)
+            # Actually, scoring_service.py calculates graph_risk on its own. 
+            # To strictly follow the user's intent, we inject the mock logic here.
+            velocity_indicator = float(features.get("F3887", pd.Series([0]))[0]) if "F3887" in features else 0
+            graph_risk_simulated = 0.7 if velocity_indicator > 500 else 0.1
+            
+            shap_payload = {
+                "prediction": xgb_prob,
+                "top_features": top_features_list,
+                "simulated_graph_risk": graph_risk_simulated
+            }
+            
+            return xgb_prob, anomaly_score, graph_risk_simulated, shap_payload
         except Exception as e:
             logger.error(f"Inference failed: {str(e)}")
-            return 0.0, 0.0, {}
+            return 0.0, 0.0, 0.0, {}
 
     def predict_batch(self, features_df: pd.DataFrame) -> pd.DataFrame:
         """

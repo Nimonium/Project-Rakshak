@@ -15,7 +15,7 @@ async def get_graph(account_id: str, depth: int = 2, prune_threshold: float = 0.
     if account_id not in G:
         return {"nodes": [], "edges": [], "suspicious_paths": []}
         
-    subgraph = nx.ego_graph(G, account_id, radius=depth)
+    subgraph = nx.ego_graph(G, account_id, radius=depth, undirected=True)
     
     # Prune edges below threshold (e.g. low amount transfers)
     if prune_threshold > 0:
