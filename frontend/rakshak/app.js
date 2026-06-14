@@ -2,7 +2,33 @@
 
 document.addEventListener('DOMContentLoaded', () => {
     // -------------------------------------------------------------------------
-    // 1. STATE MANAGEMENT
+    // 1. API CONFIGURATION
+    // -------------------------------------------------------------------------
+    const API_BASE_URL = 'http://127.0.0.1:8000/api/v1';
+    const WS_BASE_URL = 'ws://127.0.0.1:8000/ws/transactions';
+    
+    const api = axios.create({
+        baseURL: API_BASE_URL,
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    });
+
+    // Request Interceptor
+    api.interceptors.request.use(config => {
+        // You can attach tokens here if backend requires them later
+        return config;
+    }, error => Promise.reject(error));
+
+    // Response Interceptor
+    api.interceptors.response.use(response => response, error => {
+        console.error('API Error:', error);
+        showToast(error.response?.data?.detail || 'An API error occurred', 'error');
+        return Promise.reject(error);
+    });
+
+    // -------------------------------------------------------------------------
+    // 1.5. STATE MANAGEMENT
     // -------------------------------------------------------------------------
     const state = {
         isAuthenticated: false,
@@ -217,6 +243,146 @@ document.addEventListener('DOMContentLoaded', () => {
         el.topSearchInput.setAttribute('placeholder', searchPlaceholder);
     }
 
+    async function fetchDashboardData() {
+        try {
+            // Fetch alerts count
+            const alertsRes = await api.get('/alerts/');
+            const alerts = alertsRes.data;
+            document.getElementById('stat-alerts').innerText = alerts.length.toLocaleString();
+            
+            // Fetch suspicious accounts count
+            const accountsRes = await api.get('/accounts/');
+            const accounts = accountsRes.data;
+            document.getElementById('stat-mules').innerText = accounts.length.toLocaleString();
+
+            showToast('Dashboard data synchronized with backend.');
+        } catch (error) {
+            console.error('Failed to fetch dashboard data:', error);
+            document.getElementById('stat-alerts').innerText = 'ERROR';
+        }
+    }
+
+    let ws = null;
+    function initWebSocket() {
+        ws = new WebSocket(WS_BASE_URL);
+        ws.onopen = () => {
+            console.log('Connected to Rakshak Live Transaction Stream');
+        };
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Live WS Event:', data);
+                if (data.type === 'transaction_scored') {
+                    handleLiveTransaction(data.payload);
+                }
+            } catch (e) {
+                console.error("Error parsing WS message", e);
+            }
+        };
+        ws.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+        };
+        ws.onclose = () => {
+            console.log('WebSocket connection closed. Reconnecting...');
+            setTimeout(initWebSocket, 5000);
+        };
+    }
+
+    function handleLiveTransaction(payload) {
+        if (!payload || !payload.transaction) return;
+        const txId = payload.transaction.id;
+        const shortId = txId.substring(0,8).toUpperCase();
+        const score = payload.scores ? payload.scores.final_risk_score.toFixed(1) : "N/A";
+        const isCritical = payload.scores && payload.scores.final_risk_score > 80;
+        
+        // 1. Show Toast
+        if (el.liveFeedToast) {
+            el.liveFeedToast.innerHTML = `
+                <div class="flex gap-3">
+                    <div class="w-8 h-8 rounded ${isCritical ? 'bg-error/20 text-error' : 'bg-secondary/20 text-secondary'} flex items-center justify-center shrink-0">
+                        <span class="material-symbols-outlined text-[16px]">${isCritical ? 'warning' : 'info'}</span>
+                    </div>
+                    <div>
+                        <p class="text-[11px] font-bold text-on-surface">LIVE: TXN ${shortId}</p>
+                        <p class="text-[10px] ${isCritical ? 'text-error' : 'text-secondary'}">Risk Score: ${score}</p>
+                    </div>
+                </div>
+            `;
+            
+            if (el.liveFeedToast.classList.contains('opacity-0')) {
+                el.liveFeedToast.classList.remove('opacity-0', 'scale-90', 'translate-y-4', 'pointer-events-none');
+                el.liveFeedToast.classList.add('opacity-100', 'scale-100', 'translate-y-0');
+                setTimeout(() => {
+                    el.liveFeedToast.classList.add('opacity-0', 'scale-90', 'translate-y-4', 'pointer-events-none');
+                    el.liveFeedToast.classList.remove('opacity-100', 'scale-100', 'translate-y-0');
+                }, 4000);
+            }
+        }
+
+        // 2. Add to transaction table
+        const tbody = document.getElementById('transactionTableBody');
+        if (tbody) {
+            const tr = document.createElement('tr');
+            tr.className = 'hover:bg-surface-variant/30 cursor-pointer transition-all group animate-fade-in';
+            tr.setAttribute('data-txn', txId);
+            const timeStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
+            tr.innerHTML = `
+                <td class="px-4 py-3 font-mono text-xs text-on-surface-variant">${shortId}</td>
+                <td class="px-4 py-3">
+                    <div class="flex flex-col">
+                        <span class="text-sm font-bold">Sender: ${payload.transaction.sender_account_id}</span>
+                    </div>
+                </td>
+                <td class="px-4 py-3">
+                    <div class="flex flex-col">
+                        <span class="text-sm font-bold">Receiver: ${payload.transaction.receiver_account_id}</span>
+                    </div>
+                </td>
+                <td class="px-4 py-3 font-bold text-on-surface">$${payload.transaction.amount}</td>
+                <td class="px-4 py-3">
+                    <div class="flex items-center gap-2">
+                        <div class="w-12 h-1.5 bg-surface-container-highest rounded-full overflow-hidden">
+                            <div class="h-full ${isCritical ? 'bg-error' : 'bg-secondary'}" style="width: ${Math.min(100, score)}%"></div>
+                        </div>
+                        <span class="text-xs font-black ${isCritical ? 'text-error' : 'text-secondary'}">${score}</span>
+                    </div>
+                </td>
+                <td class="px-4 py-3"></td> <!-- Empty chart col -->
+                <td class="px-4 py-3 text-[11px] font-medium text-on-surface-variant">${timeStr}</td>
+                <td class="px-4 py-3">
+                    <span class="px-2 py-0.5 ${isCritical ? 'bg-error/20 text-error' : 'bg-secondary/15 border border-secondary/30 text-secondary'} text-[10px] font-bold rounded uppercase tracking-tighter">${isCritical ? 'Critical' : 'Low'}</span>
+                </td>
+            `;
+            tbody.prepend(tr);
+
+            if (tbody.children.length > 50) tbody.lastElementChild.remove();
+
+            tr.addEventListener('click', () => {
+                document.querySelectorAll('#transactionTableBody tr').forEach(r => r.className = 'hover:bg-surface-variant/30 cursor-pointer transition-colors group');
+                tr.className = 'hover:bg-surface-variant/30 cursor-pointer transition-colors group bg-surface-container-highest/20 ring-1 ring-inset ring-primary/30';
+                
+                if (el.drawerTxnTitle) {
+                    el.drawerTxnTitle.innerText = 'TXN: #' + shortId;
+                    el.drawerRiskScore.innerText = score;
+                    el.drawerConfidence.innerText = 'Live Stream';
+                    el.drawerLatency.innerText = 'Real-time';
+                    el.drawerTimelineOrigin.innerText = 'WebSocket Event';
+                    el.drawerRiskBadge.innerText = isCritical ? 'Critical' : 'Low';
+                    el.drawerGaugeCircle.setAttribute('stroke-dashoffset', isCritical ? 20 : 200);
+                    
+                    if (isCritical) {
+                        el.drawerRiskBadge.className = 'px-2 py-0.5 bg-error/20 text-error text-[10px] font-black rounded uppercase';
+                        el.drawerGaugeCircle.setAttribute('class', 'text-error');
+                    } else {
+                        el.drawerRiskBadge.className = 'px-2 py-0.5 bg-secondary/20 text-secondary text-[10px] font-black rounded uppercase';
+                        el.drawerGaugeCircle.setAttribute('class', 'text-secondary');
+                    }
+                }
+                showToast(`Loaded details for Transaction: ${txId}`);
+            });
+        }
+    }
+
     // Attach sidebar navigation listeners
     el.sidebarLinks.forEach(link => {
         link.addEventListener('click', (e) => {
@@ -263,6 +429,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Initialize modules
                 switchView('dashboard');
                 generateHeatmap();
+                fetchDashboardData();
+                initWebSocket();
             }, 1000);
         }, 1500);
     });
@@ -326,35 +494,24 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    el.runSimBtn.addEventListener('click', () => {
+    el.runSimBtn.addEventListener('click', async () => {
         if (!state.settings.simEnabled) return;
         
         el.runSimBtn.innerHTML = '<span class="material-symbols-outlined animate-spin">sync</span> Initializing Matrix...';
         el.runSimBtn.classList.remove('bg-tertiary', 'text-on-tertiary');
         el.runSimBtn.classList.add('bg-secondary-container', 'text-on-secondary-container');
         
-        setTimeout(() => {
+        try {
+            await api.post('/simulate/start');
             showToast('Rakshak Simulation Environment: Coordinated Mule Attack Deployed.', 'warning');
+        } catch (error) {
+            console.error('Failed to start simulation', error);
+            showToast('Failed to start simulation.', 'error');
+        } finally {
             el.runSimBtn.innerHTML = '<span class="material-symbols-outlined">play_circle</span> Initialize Simulation Run';
             el.runSimBtn.classList.add('bg-tertiary', 'text-on-tertiary');
             el.runSimBtn.classList.remove('bg-secondary-container', 'text-on-secondary-container');
-            
-            // Alter state values on dashboard to simulate threat
-            document.getElementById('stat-alerts').innerText = "2,842";
-            document.getElementById('stat-alerts').classList.add('text-error');
-            document.getElementById('stat-mules').innerText = "184";
-            document.getElementById('stat-mules').classList.add('text-tertiary');
-            document.getElementById('stat-anomalies').innerText = "89";
-            document.getElementById('stat-anomalies').classList.add('text-secondary');
-            
-            el.simMuleNodes.innerText = "8,410";
-            el.simSuccessRate.innerText = "8.4%";
-            el.simSuccessRate.className = "text-xl font-black text-error";
-            
-            // Spike Risk Score
-            state.feeds.globalSystemRisk = 94.7;
-            updateRiskDashboard();
-        }, 2000);
+        }
     });
 
     // API Key Generation
